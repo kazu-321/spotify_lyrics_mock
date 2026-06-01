@@ -1,0 +1,17 @@
+[package]
+name = "spotify_lyrics"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1"
+dirs = "6"
+once_cell = "1"
+regex = "1"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+rusqlite = { version = "0.32", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+gtk4 = "0.10"
+gdk4-x11 = "0.10"
+x11rb = "0.13"
