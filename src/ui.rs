@@ -676,7 +676,10 @@ impl AppController {
         state.current_line_index = 0;
         state.loading_best = None;
         state.loading_search = None;
+        state.user_scrolled = false;
         state.fetch_generation = state.fetch_generation.saturating_add(1);
+        drop(state);
+        self.sync_button.set_visible(false);
     }
 
     fn load_cached_or_fetch(self: &Rc<Self>, track: TrackInfo, key: String) {
@@ -1167,6 +1170,7 @@ impl AppController {
             state.current_line_index = 0;
             state.loading_best = None;
             state.loading_search = None;
+            state.user_scrolled = false;
         }
         while let Some(child) = self.lyrics_box.first_child() {
             self.lyrics_box.remove(&child);
@@ -1538,6 +1542,8 @@ impl AppController {
         }
         self.sync_button.set_visible(false);
         self.refresh_current_line_markup();
+        self.debug_timing_label
+            .set_text("Timing: synced to playback");
     }
 
     fn persist_settings(&self) {
