@@ -1,0 +1,79 @@
+name: Build and release deb
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  release:
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential \
+            libgdk-pixbuf-2.0-dev \
+            libgtk-4-dev \
+            libx11-dev \
+            pkg-config
+
+      - name: Install cargo-deb
+        run: cargo install cargo-deb --locked --version 3.7.0
+
+      - name: Build deb package
+        id: package
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          version="$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -n 1)"
+          short_sha="${GITHUB_SHA::12}"
+          deb_version="${version}~git.${short_sha}"
+          release_tag="ci-${short_sha}"
+
+          cargo deb --locked --deb-version "$deb_version"
+
+          deb_path="$(find target/debian -maxdepth 1 -name '*.deb' -print | head -n 1)"
+          if [ -z "$deb_path" ]; then
+            echo "failed to locate generated .deb package" >&2
+            exit 1
+          fi
+
+          echo "deb_path=$deb_path" >> "$GITHUB_OUTPUT"
+          echo "deb_version=$deb_version" >> "$GITHUB_OUTPUT"
+          echo "release_tag=$release_tag" >> "$GITHUB_OUTPUT"
+
+      - name: Create or update release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DEB_PATH: ${{ steps.package.outputs.deb_path }}
+          DEB_VERSION: ${{ steps.package.outputs.deb_version }}
+          RELEASE_TAG: ${{ steps.package.outputs.release_tag }}
+        run: |
+          set -euo pipefail
+
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" "$DEB_PATH" --clobber
+          else
+            gh release create "$RELEASE_TAG" "$DEB_PATH" \
+              --title "spotify_lyrics $DEB_VERSION" \
+              --notes "Automated build for commit $GITHUB_SHA" \
+              --prerelease
+          fi
