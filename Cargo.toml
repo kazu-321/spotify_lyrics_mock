@@ -15,3 +15,17 @@ serde_json = "1"
 gtk4 = "0.10"
 gdk4-x11 = "0.10"
 x11rb = "0.13"
+
+[package.metadata.deb]
+maintainer = "kazu"
+copyright = "2026, kazu"
+depends = "$auto"
+section = "x11"
+priority = "optional"
+extended-description = """
+Spotify lyrics desktop application built with Rust and GTK4.
+"""
+assets = [
+    ["assets/spotify_lyrics.desktop", "usr/share/applications/spotify_lyrics.desktop", "644"],
+    ["assets/spotify_lyrics.svg", "usr/share/icons/hicolor/scalable/apps/spotify_lyrics.svg", "644"],
+]

@@ -1,0 +1,11 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=Spotify Lyrics
+Comment=Desktop lyrics viewer for Spotify playback
+Exec=spotify_lyrics
+TryExec=spotify_lyrics
+Icon=spotify_lyrics
+Terminal=false
+Categories=AudioVideo;Audio;Player;
+StartupNotify=true
