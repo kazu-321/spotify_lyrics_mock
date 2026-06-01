@@ -56,6 +56,10 @@ jobs:
             exit 1
           fi
 
+          release_asset="spotify-lyrics_amd64.deb"
+          cp "$deb_path" "target/debian/$release_asset"
+          deb_path="target/debian/$release_asset"
+
           if ! dpkg-deb -c "$deb_path" | grep -qE '\./usr/bin/spotify_lyrics$'; then
             echo "generated package does not contain /usr/bin/spotify_lyrics" >&2
             exit 1
