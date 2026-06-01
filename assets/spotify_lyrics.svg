@@ -4,18 +4,22 @@
       <stop offset="0" stop-color="#1DB954"/>
       <stop offset="1" stop-color="#0B5E34"/>
     </linearGradient>
-    <linearGradient id="panel" x1="120" y1="96" x2="392" y2="416" gradientUnits="userSpaceOnUse">
-      <stop offset="0" stop-color="#1a1a1a"/>
-      <stop offset="1" stop-color="#111111"/>
+    <linearGradient id="panel" x1="128" y1="104" x2="384" y2="408" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#1A1A1A"/>
+      <stop offset="1" stop-color="#0F0F0F"/>
     </linearGradient>
+    <clipPath id="panelClip">
+      <rect x="112" y="92" width="288" height="328" rx="44"/>
+    </clipPath>
   </defs>
   <rect x="32" y="32" width="448" height="448" rx="96" fill="url(#bg)"/>
-  <rect x="104" y="88" width="304" height="336" rx="40" fill="url(#panel)" stroke="#ffffff" stroke-opacity=".08" stroke-width="6"/>
-  <path d="M172 180c34-14 69-21 112-21 46 0 86 8 121 23" fill="none" stroke="#1DB954" stroke-width="18" stroke-linecap="round"/>
-  <path d="M172 236c34-14 69-21 112-21 46 0 86 8 121 23" fill="none" stroke="#9df3bf" stroke-opacity=".9" stroke-width="18" stroke-linecap="round"/>
-  <path d="M172 292c34-14 69-21 112-21 46 0 86 8 121 23" fill="none" stroke="#ffffff" stroke-opacity=".92" stroke-width="18" stroke-linecap="round"/>
-  <circle cx="186" cy="350" r="18" fill="#1DB954"/>
-  <circle cx="236" cy="350" r="18" fill="#9df3bf"/>
-  <circle cx="286" cy="350" r="18" fill="#ffffff"/>
-  <path d="M152 136h208" stroke="#ffffff" stroke-opacity=".18" stroke-width="10" stroke-linecap="round"/>
+  <rect x="112" y="92" width="288" height="328" rx="44" fill="url(#panel)" stroke="#ffffff" stroke-opacity=".08" stroke-width="6"/>
+  <g clip-path="url(#panelClip)" fill="none" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M150 178c28-18 55-27 82-27 27 0 54 9 82 27" stroke="#2FDE7D" stroke-width="16"/>
+    <path d="M150 230c28-18 55-27 82-27 27 0 54 9 82 27" stroke="#92F1B5" stroke-width="16"/>
+    <path d="M150 282c28-18 55-27 82-27 27 0 54 9 82 27" stroke="#FFFFFF" stroke-opacity=".92" stroke-width="16"/>
+    <path d="M150 334c20-12 39-18 58-18 19 0 38 6 58 18" stroke="#2FDE7D" stroke-opacity=".9" stroke-width="14"/>
+    <path d="M220 334c20-12 39-18 58-18 19 0 38 6 58 18" stroke="#92F1B5" stroke-opacity=".9" stroke-width="14"/>
+  </g>
+  <path d="M154 138h204" stroke="#ffffff" stroke-opacity=".16" stroke-width="10" stroke-linecap="round"/>
 </svg>

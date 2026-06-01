@@ -56,6 +56,17 @@ jobs:
             exit 1
           fi
 
+          if ! dpkg-deb -c "$deb_path" | grep -qE '\./usr/bin/spotify_lyrics$'; then
+            echo "generated package does not contain /usr/bin/spotify_lyrics" >&2
+            exit 1
+          fi
+
+          deb_size="$(stat -c '%s' "$deb_path")"
+          if [ "$deb_size" -lt 1000000 ]; then
+            echo "generated package is suspiciously small: $deb_size bytes" >&2
+            exit 1
+          fi
+
           echo "deb_path=$deb_path" >> "$GITHUB_OUTPUT"
           echo "deb_version=$deb_version" >> "$GITHUB_OUTPUT"
           echo "release_tag=$release_tag" >> "$GITHUB_OUTPUT"

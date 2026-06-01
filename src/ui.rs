@@ -13,29 +13,33 @@ use std::thread;
 use std::time::Duration;
 
 use crate::lyrics::{
-    fetch_best_candidate, fetch_search_candidates, parse_candidate, LyricsCandidate, ParsedLyrics,
+    fetch_candidate_for_source, fetch_search_candidates, parse_candidate, LyricsCandidate,
+    ParsedLyrics,
 };
 use crate::spotify::{read_snapshot, SpotifySnapshot, TrackInfo};
-use crate::storage::{AppSettings, CachedLyrics, LyricsStore};
+use crate::storage::{AppSettings, CachedLyrics, LyricsSource, LyricsStore};
 
 enum WorkerMsg {
     BestFetched {
+        fetch_generation: u64,
         track_key: String,
         track: TrackInfo,
         candidate: LyricsCandidate,
     },
     SearchFetched {
+        fetch_generation: u64,
         track_key: String,
         candidates: Vec<LyricsCandidate>,
     },
     Failed {
+        fetch_generation: u64,
         track_key: String,
         source: &'static str,
         error: String,
     },
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct AppConfig {
     topmost: bool,
     auto_line_count: bool,
@@ -43,6 +47,8 @@ struct AppConfig {
     background_opacity: f64,
     timing_offset_ms: i32,
     char_follow: bool,
+    lyrics_source: LyricsSource,
+    sp_dc: String,
     window_width: i32,
     window_height: i32,
     window_x: i32,
@@ -58,6 +64,8 @@ impl From<AppSettings> for AppConfig {
             background_opacity: value.background_opacity,
             timing_offset_ms: value.timing_offset_ms,
             char_follow: value.char_follow,
+            lyrics_source: value.lyrics_source,
+            sp_dc: value.sp_dc,
             window_width: value.window_width,
             window_height: value.window_height,
             window_x: value.window_x,
@@ -75,6 +83,8 @@ impl From<AppConfig> for AppSettings {
             background_opacity: value.background_opacity,
             timing_offset_ms: value.timing_offset_ms,
             char_follow: value.char_follow,
+            lyrics_source: value.lyrics_source,
+            sp_dc: value.sp_dc,
             window_width: value.window_width,
             window_height: value.window_height,
             window_x: value.window_x,
@@ -92,6 +102,8 @@ impl Default for AppConfig {
             background_opacity: 0.94,
             timing_offset_ms: 0,
             char_follow: false,
+            lyrics_source: LyricsSource::Lrclib,
+            sp_dc: String::new(),
             window_width: 720,
             window_height: 560,
             window_x: 80,
@@ -110,6 +122,7 @@ struct RuntimeState {
     loading_best: Option<String>,
     loading_search: Option<String>,
     user_scrolled: bool,
+    fetch_generation: u64,
 }
 
 impl RuntimeState {
@@ -124,6 +137,7 @@ impl RuntimeState {
             loading_best: None,
             loading_search: None,
             user_scrolled: false,
+            fetch_generation: 0,
         }
     }
 }
@@ -142,10 +156,13 @@ pub struct AppController {
     change_popover: gtk::Popover,
     candidate_list: gtk::ListBox,
     settings_popover: gtk::Popover,
+    settings_close_button: gtk::Button,
     topmost_switch: gtk::Switch,
     opacity_spin: gtk::SpinButton,
     timing_offset_spin: gtk::SpinButton,
     char_follow_switch: gtk::Switch,
+    lyrics_source_combo: gtk::ComboBoxText,
+    sp_dc_entry: gtk::Entry,
     debug_track_label: gtk::Label,
     debug_playback_label: gtk::Label,
     debug_state_label: gtk::Label,
@@ -163,6 +180,7 @@ pub struct AppController {
     suppress_scroll_signal: Cell<bool>,
     last_window_geometry: RefCell<Option<(i32, i32, i32, i32)>>,
     suppress_setting_updates: Cell<bool>,
+    settings_dirty: Cell<bool>,
 }
 
 impl AppController {
@@ -171,7 +189,7 @@ impl AppController {
         let (tx, rx) = mpsc::channel();
 
         let initial_config = AppConfig::from(store.load_settings()?);
-        let config = RefCell::new(initial_config);
+        let config = RefCell::new(initial_config.clone());
 
         let window = gtk::ApplicationWindow::builder()
             .application(app)
@@ -275,6 +293,7 @@ impl AppController {
 
         let settings_popover = gtk::Popover::new();
         settings_popover.set_has_arrow(true);
+        settings_popover.set_autohide(true);
         let settings_root = gtk::Box::new(gtk::Orientation::Vertical, 10);
         settings_root.set_margin_top(12);
         settings_root.set_margin_bottom(12);
@@ -289,11 +308,31 @@ impl AppController {
         let timing_offset_spin = gtk::SpinButton::new(Some(&timing_adjustment), 1.0, 0);
         timing_offset_spin.set_value(0.0);
         let char_follow_switch = gtk::Switch::builder().active(false).build();
+        let lyrics_source_combo = gtk::ComboBoxText::new();
+        lyrics_source_combo.append(Some(LyricsSource::Lrclib.as_str()), "LRCLIB");
+        lyrics_source_combo.append(
+            Some(LyricsSource::SpotifyOfficial.as_str()),
+            "Spotify official",
+        );
+        let sp_dc_entry = gtk::Entry::new();
+        sp_dc_entry.set_visibility(false);
+        sp_dc_entry.set_input_purpose(gtk::InputPurpose::Password);
+        sp_dc_entry.set_placeholder_text(Some("sp_dc cookie"));
+        sp_dc_entry.set_width_chars(36);
 
         settings_root.append(&labeled_row("Always on top", &topmost_switch));
         settings_root.append(&labeled_row("Background opacity", &opacity_spin));
         settings_root.append(&labeled_row("Timing offset (ms)", &timing_offset_spin));
         settings_root.append(&labeled_row("Character follow", &char_follow_switch));
+        settings_root.append(&labeled_row("Lyrics source", &lyrics_source_combo));
+        settings_root.append(&labeled_row("Spotify sp_dc", &sp_dc_entry));
+        let sp_dc_note = gtk::Label::new(Some(
+            "Used only for Spotify official lyrics. Paste the browser cookie value here.",
+        ));
+        sp_dc_note.set_wrap(true);
+        sp_dc_note.set_xalign(0.0);
+        sp_dc_note.add_css_class("dim-label");
+        settings_root.append(&sp_dc_note);
 
         let debug_title = gtk::Label::new(Some("Debug"));
         debug_title.set_xalign(0.0);
@@ -321,12 +360,18 @@ impl AppController {
         settings_root.append(&debug_timing_label);
 
         let char_note = gtk::Label::new(Some(
-            "Character-level karaoke timing is not supported by LRCLIB's line timestamps.",
+            "Character-level karaoke timing is heuristic and line-based.",
         ));
         char_note.set_wrap(true);
         char_note.set_xalign(0.0);
         char_note.add_css_class("dim-label");
         settings_root.append(&char_note);
+
+        let settings_actions = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        settings_actions.set_halign(gtk::Align::End);
+        let settings_close_button = gtk::Button::with_label("Close");
+        settings_actions.append(&settings_close_button);
+        settings_root.append(&settings_actions);
 
         settings_popover.set_child(Some(&settings_root));
         settings_popover.set_parent(&window);
@@ -345,10 +390,13 @@ impl AppController {
             change_popover,
             candidate_list,
             settings_popover,
+            settings_close_button,
             topmost_switch,
             opacity_spin,
             timing_offset_spin,
             char_follow_switch,
+            lyrics_source_combo,
+            sp_dc_entry,
             debug_track_label,
             debug_playback_label,
             debug_state_label,
@@ -366,6 +414,7 @@ impl AppController {
             suppress_scroll_signal: Cell::new(false),
             last_window_geometry: RefCell::new(None),
             suppress_setting_updates: Cell::new(false),
+            settings_dirty: Cell::new(false),
         });
 
         controller.install_handlers();
@@ -381,7 +430,7 @@ impl AppController {
         if let Some(app) = self.window.application() {
             *self.app_hold.borrow_mut() = Some(app.hold());
         }
-        let cfg = *self.config.borrow();
+        let cfg = self.config.borrow().clone();
         eprintln!(
             "show: applying initial geometry {}x{}+{}+{}",
             cfg.window_width, cfg.window_height, cfg.window_x, cfg.window_y
@@ -442,6 +491,44 @@ impl AppController {
         });
 
         let this = Rc::clone(self);
+        self.lyrics_source_combo.connect_changed(move |combo| {
+            if this.suppress_setting_updates.get() {
+                return;
+            }
+            let Some(active_id) = combo.active_id() else {
+                return;
+            };
+            let source = match active_id.as_str() {
+                "spotify_official" => LyricsSource::SpotifyOfficial,
+                _ => LyricsSource::Lrclib,
+            };
+            {
+                let mut config = this.config.borrow_mut();
+                config.lyrics_source = source;
+            }
+            this.persist_settings();
+            this.settings_dirty.set(true);
+            this.refresh_debug();
+        });
+
+        let this = Rc::clone(self);
+        self.sp_dc_entry.connect_changed(move |entry| {
+            if this.suppress_setting_updates.get() {
+                return;
+            }
+            let value = entry.text().trim().to_string();
+            {
+                let mut config = this.config.borrow_mut();
+                config.sp_dc = value;
+            }
+            this.persist_settings();
+            if this.config.borrow().lyrics_source == LyricsSource::SpotifyOfficial {
+                this.settings_dirty.set(true);
+            }
+            this.refresh_debug();
+        });
+
+        let this = Rc::clone(self);
         self.window.connect_notify_local(Some("width"), move |_, _| {
             this.render_lyrics();
         });
@@ -460,9 +547,28 @@ impl AppController {
         let this = Rc::clone(self);
         self.settings_button.connect_clicked(move |_| {
             this.menu_popover.popdown();
-            this.sync_settings_ui();
-            this.refresh_debug();
-            this.settings_popover.popup();
+            if this.settings_popover.is_visible() {
+                this.settings_popover.popdown();
+            } else {
+                this.sync_settings_ui();
+                this.refresh_debug();
+                this.settings_popover.popup();
+            }
+        });
+
+        let this = Rc::clone(self);
+        self.settings_close_button.connect_clicked(move |_| {
+            this.settings_popover.popdown();
+        });
+
+        let this = Rc::clone(self);
+        self.settings_popover.connect_notify_local(Some("visible"), move |popover, _| {
+            if popover.is_visible() {
+                return;
+            }
+            if this.settings_dirty.replace(false) {
+                this.reload_current_track();
+            }
         });
 
         let this = Rc::clone(self);
@@ -531,7 +637,7 @@ impl AppController {
             return;
         };
 
-        let key = track.cache_key();
+        let key = self.active_lyrics_key(&track);
         let track_changed = {
             let state = self.state.borrow();
             state.current_track_key.as_ref() != Some(&key)
@@ -540,8 +646,7 @@ impl AppController {
         if track_changed {
             self.reset_for_new_track(track.clone(), key.clone());
             self.set_track_header(&track);
-            self.debug_state_label.set_text("State: Loading best lyrics...");
-            self.load_cached_or_best(track, key);
+            self.load_cached_or_fetch(track, key);
             self.render_lyrics();
             self.refresh_debug();
             return;
@@ -556,6 +661,11 @@ impl AppController {
         self.refresh_debug();
     }
 
+    fn active_lyrics_key(&self, track: &TrackInfo) -> String {
+        let source = self.config.borrow().lyrics_source.as_str();
+        format!("{source}:{}", track.cache_key())
+    }
+
     fn reset_for_new_track(&self, track: TrackInfo, key: String) {
         let mut state = self.state.borrow_mut();
         state.current_track_key = Some(key);
@@ -566,10 +676,26 @@ impl AppController {
         state.current_line_index = 0;
         state.loading_best = None;
         state.loading_search = None;
+        state.fetch_generation = state.fetch_generation.saturating_add(1);
     }
 
-    fn load_cached_or_best(self: &Rc<Self>, track: TrackInfo, key: String) {
-        match self.store.load(&key) {
+    fn load_cached_or_fetch(self: &Rc<Self>, track: TrackInfo, key: String) {
+        let source = self.config.borrow().lyrics_source;
+        let legacy_key = legacy_track_key(&track);
+        let loaded = match self.store.load(&key) {
+            Ok(Some(value)) => Ok(Some(value)),
+            Ok(None) if source == LyricsSource::Lrclib => self.store.load(&legacy_key),
+            Ok(None) => Ok(None),
+            Err(err) if source == LyricsSource::Lrclib => {
+                match self.store.load(&legacy_key) {
+                    Ok(value) => Ok(value),
+                    Err(_) => Err(err),
+                }
+            }
+            Err(err) => Err(err),
+        };
+
+        match loaded {
             Ok(Some(CachedLyrics {
                 selected_candidate_id,
                 candidates,
@@ -577,51 +703,70 @@ impl AppController {
             })) => {
                 self.apply_candidates(track, key, candidates, selected_candidate_id, true, true);
             }
-            Ok(None) => self.spawn_best_fetch(track, key),
+            Ok(None) => match source {
+                LyricsSource::Lrclib => self.spawn_primary_fetch(track, key),
+                LyricsSource::SpotifyOfficial => self.spawn_primary_fetch(track, key),
+            },
             Err(err) => {
                 self.debug_state_label
                     .set_text(&format!("State: Cache read failed: {err:#}"));
-                self.spawn_best_fetch(track, key);
+                self.spawn_primary_fetch(track, key);
             }
         }
     }
 
-    fn spawn_best_fetch(self: &Rc<Self>, track: TrackInfo, key: String) {
-        let should_skip = self
-            .state
-            .borrow()
-            .loading_best
-            .as_ref()
-            .is_some_and(|current| current == &key);
-        if should_skip {
-            return;
-        }
-
-        self.state.borrow_mut().loading_best = Some(key.clone());
-        let tx = self.tx.clone();
-        thread::spawn(move || match fetch_best_candidate(&track) {
-            Ok(candidate) => {
-                eprintln!(
-                    "best fetched: {} - {} | synced={} plain={} instrumental={}",
-                    track.artist,
-                    track.title,
-                    candidate.has_synced(),
-                    candidate.has_plain(),
-                    candidate.instrumental
-                );
-                let _ = tx.send(WorkerMsg::BestFetched {
-                    track_key: key,
-                    track,
-                    candidate,
-                });
+    fn spawn_primary_fetch(self: &Rc<Self>, track: TrackInfo, key: String) {
+        let (generation, source) = {
+            let mut state = self.state.borrow_mut();
+            let loading = state.loading_best.as_ref().is_some_and(|current| current == &key);
+            if loading {
+                return;
             }
-            Err(err) => {
-                eprintln!("best fetch failed: {} - {} | {err:#}", track.artist, track.title);
-                let _ = tx.send(WorkerMsg::Failed {
-                    track_key: key,
-                    source: "best",
-                    error: err.to_string(),
-                });
+            state.loading_best = Some(key.clone());
+            (state.fetch_generation, self.config.borrow().lyrics_source)
+        };
+
+        self.debug_state_label.set_text(match source {
+            LyricsSource::Lrclib => "State: Loading LRCLIB lyrics...",
+            LyricsSource::SpotifyOfficial => "State: Loading Spotify official lyrics...",
+        });
+        let tx = self.tx.clone();
+        let sp_dc = self.config.borrow().sp_dc.clone();
+        thread::spawn(move || {
+            let result = fetch_candidate_for_source(&track, source, &sp_dc);
+            match result {
+                Ok(candidate) => {
+                    eprintln!(
+                        "primary fetched: {} - {} | synced={} plain={} instrumental={} source={}",
+                        track.artist,
+                        track.title,
+                        candidate.has_synced(),
+                        candidate.has_plain(),
+                        candidate.instrumental,
+                        source.as_str()
+                    );
+                    let _ = tx.send(WorkerMsg::BestFetched {
+                        fetch_generation: generation,
+                        track_key: key,
+                        track,
+                        candidate,
+                    });
+                }
+                Err(err) => {
+                    eprintln!(
+                        "primary fetch failed: {} - {} | {err:#}",
+                        track.artist, track.title
+                    );
+                    let _ = tx.send(WorkerMsg::Failed {
+                        fetch_generation: generation,
+                        track_key: key,
+                        source: match source {
+                            LyricsSource::Lrclib => "lrclib",
+                            LyricsSource::SpotifyOfficial => "spotify_official",
+                        },
+                        error: err.to_string(),
+                    });
+                }
             }
         });
     }
@@ -642,15 +787,18 @@ impl AppController {
         self.debug_state_label
             .set_text("State: Searching more candidates...");
         let tx = self.tx.clone();
+        let generation = self.state.borrow().fetch_generation;
         thread::spawn(move || match fetch_search_candidates(&track) {
             Ok(candidates) => {
                 let _ = tx.send(WorkerMsg::SearchFetched {
+                    fetch_generation: generation,
                     track_key: key,
                     candidates,
                 });
             }
             Err(err) => {
                 let _ = tx.send(WorkerMsg::Failed {
+                    fetch_generation: generation,
                     track_key: key,
                     source: "search",
                     error: err.to_string(),
@@ -671,40 +819,59 @@ impl AppController {
         for msg in messages {
             match msg {
                 WorkerMsg::BestFetched {
+                    fetch_generation,
                     track_key,
                     track,
                     candidate,
                 } => {
-                    if self.state.borrow().current_track_key.as_ref() != Some(&track_key) {
+                    let should_apply = {
+                        let state = self.state.borrow();
+                        state.current_track_key.as_ref() == Some(&track_key)
+                            && state.fetch_generation == fetch_generation
+                    };
+                    if !should_apply {
                         continue;
                     }
                     self.apply_candidates(track, track_key, vec![candidate], None, false, true);
                 }
                 WorkerMsg::SearchFetched {
+                    fetch_generation,
                     track_key,
                     candidates,
                 } => {
-                    if self.state.borrow().current_track_key.as_ref() != Some(&track_key) {
-                        continue;
-                    }
-                    let track = self.state.borrow().current_track.clone();
+                    let track = {
+                        let state = self.state.borrow();
+                        if state.current_track_key.as_ref() != Some(&track_key)
+                            || state.fetch_generation != fetch_generation
+                        {
+                            None
+                        } else {
+                            state.current_track.clone()
+                        }
+                    };
                     if let Some(track) = track {
                         self.apply_candidates(track, track_key, candidates, None, false, false);
                     }
                 }
                 WorkerMsg::Failed {
+                    fetch_generation,
                     track_key,
                     source,
                     error,
                 } => {
-                    if self.state.borrow().current_track_key.as_ref() != Some(&track_key) {
+                    let should_apply = {
+                        let state = self.state.borrow();
+                        state.current_track_key.as_ref() == Some(&track_key)
+                            && state.fetch_generation == fetch_generation
+                    };
+                    if !should_apply {
                         continue;
                     }
                     let mut state = self.state.borrow_mut();
-                    if source == "best" {
-                        state.loading_best = None;
-                    } else {
+                    if source == "search" {
                         state.loading_search = None;
+                    } else {
+                        state.loading_best = None;
                     }
                     self.debug_state_label
                         .set_text(&format!("State: {source} lyrics fetch failed: {error}"));
@@ -751,7 +918,9 @@ impl AppController {
         );
 
         if auto_apply {
+            let cache_key = self.active_lyrics_key(&track);
             if let Err(err) = self.store.save(
+                &cache_key,
                 &track,
                 selected.as_ref().map(|candidate| candidate.id),
                 &candidates,
@@ -763,6 +932,7 @@ impl AppController {
             } else {
                 self.debug_state_label.set_text("State: Loaded lyrics");
             }
+            self.state.borrow_mut().current_track_key = Some(cache_key);
             self.render_lyrics();
         } else if from_cache {
             self.debug_state_label
@@ -778,19 +948,36 @@ impl AppController {
     fn open_change_popover(self: &Rc<Self>) {
         let current_track = { self.state.borrow().current_track.clone() };
         if let Some(track) = current_track {
-            let key = track.cache_key();
-            let should_fetch = {
-                let state = self.state.borrow();
-                state.current_candidates.len() <= 1
-                    && state.loading_search.as_ref() != Some(&key)
-            };
-            if should_fetch {
-                self.spawn_search_fetch(track, key);
-            } else {
+            let source = self.config.borrow().lyrics_source;
+            if source == LyricsSource::SpotifyOfficial {
                 self.render_candidate_rows();
+            } else {
+                let key = self.active_lyrics_key(&track);
+                let should_fetch = {
+                    let state = self.state.borrow();
+                    state.current_candidates.len() <= 1
+                        && state.loading_search.as_ref() != Some(&key)
+                };
+                if should_fetch {
+                    self.spawn_search_fetch(track, key);
+                } else {
+                    self.render_candidate_rows();
+                }
             }
         }
         self.change_popover.popup();
+    }
+
+    fn reload_current_track(self: &Rc<Self>) {
+        let current_track = { self.state.borrow().current_track.clone() };
+        if let Some(track) = current_track {
+            let key = self.active_lyrics_key(&track);
+            self.reset_for_new_track(track.clone(), key.clone());
+            self.set_track_header(&track);
+            self.load_cached_or_fetch(track, key);
+            self.render_lyrics();
+            self.refresh_debug();
+        }
     }
 
     fn render_candidate_rows(self: &Rc<Self>) {
@@ -853,16 +1040,24 @@ impl AppController {
             state.selected_candidate_id = Some(candidate.id);
             state.selected_lyrics = Some(parse_candidate(&candidate));
             state.current_line_index = 0;
+            state.loading_best = None;
+            state.loading_search = None;
+            state.fetch_generation = state.fetch_generation.saturating_add(1);
         }
 
         if let Some(track) = track {
-            if let Err(err) = self.store.save(&track, Some(candidate.id), &candidates) {
+            let cache_key = self.active_lyrics_key(&track);
+            if let Err(err) = self
+                .store
+                .save(&cache_key, &track, Some(candidate.id), &candidates)
+            {
                 self.debug_state_label
                     .set_text(&format!("State: Cache save failed: {err:#}"));
             } else {
                 self.debug_state_label
                     .set_text(&format!("State: Selected candidate {}", candidate.id));
             }
+            self.state.borrow_mut().current_track_key = Some(cache_key);
         }
 
         self.render_lyrics();
@@ -1077,7 +1272,7 @@ impl AppController {
             return;
         }
         self.restore_attempts.set(0);
-        let cfg = *self.config.borrow();
+        let cfg = self.config.borrow().clone();
         eprintln!(
             "schedule_restore_geometry: want {}x{}+{}+{}",
             cfg.window_width, cfg.window_height, cfg.window_x, cfg.window_y
@@ -1098,7 +1293,7 @@ impl AppController {
         if self.restore_applied.get() {
             return;
         }
-        let cfg = *self.config.borrow();
+        let cfg = self.config.borrow().clone();
         let attempt = self.restore_attempts.get() + 1;
         eprintln!(
             "try_restore_window_geometry attempt {}: target {}x{}+{}+{}",
@@ -1223,7 +1418,7 @@ impl AppController {
     }
 
     fn apply_visual_settings(&self) {
-        let cfg = *self.config.borrow();
+        let cfg = self.config.borrow().clone();
         self.window.set_opacity(cfg.background_opacity.clamp(0.2, 1.0));
     }
 
@@ -1346,7 +1541,7 @@ impl AppController {
     }
 
     fn persist_settings(&self) {
-        let settings = AppSettings::from(*self.config.borrow());
+        let settings = AppSettings::from(self.config.borrow().clone());
         if let Err(err) = self.store.save_settings(&settings) {
             eprintln!("persist_settings: failed: {err:#}");
             self.debug_state_label
@@ -1369,19 +1564,22 @@ impl AppController {
 
     fn sync_settings_ui(&self) {
         self.suppress_setting_updates.set(true);
-        let config = *self.config.borrow();
+        let config = self.config.borrow().clone();
         self.topmost_switch.set_active(config.topmost);
         self.opacity_spin.set_value(config.background_opacity);
         self.timing_offset_spin
             .set_value(config.timing_offset_ms as f64);
         self.char_follow_switch.set_active(config.char_follow);
+        self.lyrics_source_combo
+            .set_active_id(Some(config.lyrics_source.as_str()));
+        self.sp_dc_entry.set_text(&config.sp_dc);
         self.suppress_setting_updates.set(false);
         self.apply_visual_settings();
     }
 
     fn refresh_debug(&self) {
         let state = self.state.borrow();
-        let cfg = *self.config.borrow();
+        let cfg = self.config.borrow().clone();
         let track = state
             .current_track
             .as_ref()
@@ -1407,7 +1605,10 @@ impl AppController {
         ) {
             (Some(best), Some(search)) if best == search => "best/search loading same track".to_string(),
             (Some(_), Some(_)) => "best + search loading".to_string(),
-            (Some(_), None) => "best loading".to_string(),
+            (Some(_), None) => match cfg.lyrics_source {
+                LyricsSource::SpotifyOfficial => "spotify official loading".to_string(),
+                LyricsSource::Lrclib => "best loading".to_string(),
+            },
             (None, Some(_)) => "search loading".to_string(),
             (None, None) => "idle".to_string(),
         };
@@ -1416,10 +1617,11 @@ impl AppController {
         self.debug_playback_label
             .set_text(&format!("Playback: {playback}"));
         self.debug_state_label.set_text(&format!(
-            "State: {loading} • topmost={} • opacity={:.2} • char={} • offset={}ms",
+            "State: {loading} • topmost={} • opacity={:.2} • char={} • source={} • offset={}ms",
             cfg.topmost,
             cfg.background_opacity,
             cfg.char_follow,
+            cfg.lyrics_source.as_str(),
             cfg.timing_offset_ms
         ));
         self.debug_candidate_label
@@ -1476,6 +1678,29 @@ fn pick_selected_candidate(
 
 fn escape_markup(input: &str) -> String {
     glib::markup_escape_text(input).to_string()
+}
+
+fn legacy_track_key(track: &TrackInfo) -> String {
+    if let Some(track_id) = &track.track_id {
+        return track_id.clone();
+    }
+
+    format!(
+        "{}|{}|{}",
+        normalize_legacy(&track.artist),
+        normalize_legacy(&track.title),
+        track.duration_ms / 1000
+    )
+}
+
+fn normalize_legacy(input: &str) -> String {
+    input
+        .trim()
+        .to_lowercase()
+        .replace('\u{3000}', " ")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn labeled_row<T: IsA<gtk::Widget>>(label: &str, widget: &T) -> gtk::Box {

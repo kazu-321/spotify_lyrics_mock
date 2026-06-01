@@ -4,7 +4,9 @@ use gtk4::glib;
 use gtk4::prelude::FileExtManual;
 use serde::{Deserialize, Serialize};
 
+use crate::spotify_official;
 use crate::spotify::TrackInfo;
+use crate::storage::LyricsSource;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LyricsCandidate {
@@ -93,6 +95,17 @@ pub fn fetch_search_candidates(track: &TrackInfo) -> Result<Vec<LyricsCandidate>
         Err(anyhow!("no lyrics candidates found"))
     } else {
         Ok(candidates)
+    }
+}
+
+pub fn fetch_candidate_for_source(
+    track: &TrackInfo,
+    source: LyricsSource,
+    sp_dc: &str,
+) -> Result<LyricsCandidate> {
+    match source {
+        LyricsSource::Lrclib => fetch_best_candidate(track),
+        LyricsSource::SpotifyOfficial => spotify_official::fetch_candidate(track, sp_dc),
     }
 }
 

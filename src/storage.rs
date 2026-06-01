@@ -7,6 +7,34 @@ use std::path::PathBuf;
 use crate::lyrics::LyricsCandidate;
 use crate::spotify::TrackInfo;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LyricsSource {
+    Lrclib,
+    SpotifyOfficial,
+}
+
+impl Default for LyricsSource {
+    fn default() -> Self {
+        Self::Lrclib
+    }
+}
+
+impl LyricsSource {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Lrclib => "lrclib",
+            Self::SpotifyOfficial => "spotify_official",
+        }
+    }
+
+    pub fn from_db(value: &str) -> Self {
+        match value {
+            "spotify_official" => Self::SpotifyOfficial,
+            _ => Self::Lrclib,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CachedLyrics {
     pub track_key: String,
@@ -14,7 +42,7 @@ pub struct CachedLyrics {
     pub candidates: Vec<LyricsCandidate>,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppSettings {
     pub topmost: bool,
     pub auto_line_count: bool,
@@ -22,6 +50,8 @@ pub struct AppSettings {
     pub background_opacity: f64,
     pub timing_offset_ms: i32,
     pub char_follow: bool,
+    pub lyrics_source: LyricsSource,
+    pub sp_dc: String,
     pub window_width: i32,
     pub window_height: i32,
     pub window_x: i32,
@@ -37,6 +67,8 @@ impl Default for AppSettings {
             background_opacity: 0.94,
             timing_offset_ms: 0,
             char_follow: false,
+            lyrics_source: LyricsSource::Lrclib,
+            sp_dc: String::new(),
             window_width: 720,
             window_height: 560,
             window_x: 80,
@@ -78,6 +110,8 @@ impl LyricsStore {
                 background_opacity REAL NOT NULL,
                 timing_offset_ms INTEGER NOT NULL,
                 char_follow INTEGER NOT NULL,
+                lyrics_source TEXT NOT NULL DEFAULT 'lrclib',
+                sp_dc TEXT NOT NULL DEFAULT '',
                 window_width INTEGER NOT NULL,
                 window_height INTEGER NOT NULL,
                 window_x INTEGER NOT NULL,
@@ -95,7 +129,7 @@ impl LyricsStore {
     pub fn load_settings(&self) -> Result<AppSettings> {
         let mut stmt = self.conn.prepare(
             r#"
-            SELECT topmost, auto_line_count, max_lines, background_opacity, timing_offset_ms, char_follow, window_width, window_height, window_x, window_y
+            SELECT topmost, auto_line_count, max_lines, background_opacity, timing_offset_ms, char_follow, lyrics_source, sp_dc, window_width, window_height, window_x, window_y
             FROM app_settings
             WHERE id = 1
             "#,
@@ -110,19 +144,22 @@ impl LyricsStore {
                 background_opacity: row.get::<_, f64>(3)?,
                 timing_offset_ms: row.get::<_, i64>(4)? as i32,
                 char_follow: row.get::<_, i64>(5)? != 0,
-                window_width: row.get::<_, i64>(6)? as i32,
-                window_height: row.get::<_, i64>(7)? as i32,
-                window_x: row.get::<_, i64>(8)? as i32,
-                window_y: row.get::<_, i64>(9)? as i32,
+                lyrics_source: LyricsSource::from_db(&row.get::<_, String>(6)?),
+                sp_dc: row.get::<_, String>(7)?,
+                window_width: row.get::<_, i64>(8)? as i32,
+                window_height: row.get::<_, i64>(9)? as i32,
+                window_x: row.get::<_, i64>(10)? as i32,
+                window_y: row.get::<_, i64>(11)? as i32,
             };
             eprintln!(
-                "load_settings: topmost={} auto_line_count={} max_lines={} opacity={:.2} offset={} char={} geometry={}x{}+{}+{}",
+                "load_settings: topmost={} auto_line_count={} max_lines={} opacity={:.2} offset={} char={} source={} geometry={}x{}+{}+{}",
                 settings.topmost,
                 settings.auto_line_count,
                 settings.max_lines,
                 settings.background_opacity,
                 settings.timing_offset_ms,
                 settings.char_follow,
+                settings.lyrics_source.as_str(),
                 settings.window_width,
                 settings.window_height,
                 settings.window_x,
@@ -137,13 +174,14 @@ impl LyricsStore {
 
     pub fn save_settings(&self, settings: &AppSettings) -> Result<()> {
         eprintln!(
-            "save_settings: topmost={} auto_line_count={} max_lines={} opacity={:.2} offset={} char={} geometry={}x{}+{}+{}",
+            "save_settings: topmost={} auto_line_count={} max_lines={} opacity={:.2} offset={} char={} source={} geometry={}x{}+{}+{}",
             settings.topmost,
             settings.auto_line_count,
             settings.max_lines,
             settings.background_opacity,
             settings.timing_offset_ms,
             settings.char_follow,
+            settings.lyrics_source.as_str(),
             settings.window_width,
             settings.window_height,
             settings.window_x,
@@ -152,9 +190,9 @@ impl LyricsStore {
         self.conn.execute(
             r#"
             INSERT INTO app_settings (
-                id, topmost, auto_line_count, max_lines, background_opacity, timing_offset_ms, char_follow, window_width, window_height, window_x, window_y, updated_at
+                id, topmost, auto_line_count, max_lines, background_opacity, timing_offset_ms, char_follow, lyrics_source, sp_dc, window_width, window_height, window_x, window_y, updated_at
             )
-            VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, strftime('%s', 'now'))
+            VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, strftime('%s', 'now'))
             ON CONFLICT(id) DO UPDATE SET
                 topmost = excluded.topmost,
                 auto_line_count = excluded.auto_line_count,
@@ -162,6 +200,8 @@ impl LyricsStore {
                 background_opacity = excluded.background_opacity,
                 timing_offset_ms = excluded.timing_offset_ms,
                 char_follow = excluded.char_follow,
+                lyrics_source = excluded.lyrics_source,
+                sp_dc = excluded.sp_dc,
                 window_width = excluded.window_width,
                 window_height = excluded.window_height,
                 window_x = excluded.window_x,
@@ -175,6 +215,8 @@ impl LyricsStore {
                 settings.background_opacity,
                 settings.timing_offset_ms as i64,
                 settings.char_follow as i64,
+                settings.lyrics_source.as_str(),
+                settings.sp_dc,
                 settings.window_width as i64,
                 settings.window_height as i64,
                 settings.window_x as i64,
@@ -210,6 +252,7 @@ impl LyricsStore {
 
     pub fn save(
         &self,
+        track_key: &str,
         track: &TrackInfo,
         selected_candidate_id: Option<i64>,
         candidates: &[LyricsCandidate],
@@ -232,7 +275,7 @@ impl LyricsStore {
                 updated_at = excluded.updated_at
             "#,
             params![
-                track.cache_key(),
+                track_key,
                 track.artist,
                 track.title,
                 track.album,
@@ -254,12 +297,23 @@ fn migrate_settings_schema(conn: &Connection) -> Result<()> {
             return Ok(());
         }
 
-    let required = ["auto_line_count", "max_lines", "window_width", "window_height", "window_x", "window_y"];
+    let required = [
+        "auto_line_count",
+        "max_lines",
+        "lyrics_source",
+        "sp_dc",
+        "window_width",
+        "window_height",
+        "window_x",
+        "window_y",
+    ];
     for column in required {
         if !columns.iter().any(|existing| existing == column) {
             let sql = match column {
                 "auto_line_count" => "ALTER TABLE app_settings ADD COLUMN auto_line_count INTEGER NOT NULL DEFAULT 1",
                 "max_lines" => "ALTER TABLE app_settings ADD COLUMN max_lines INTEGER NOT NULL DEFAULT 18",
+                "lyrics_source" => "ALTER TABLE app_settings ADD COLUMN lyrics_source TEXT NOT NULL DEFAULT 'lrclib'",
+                "sp_dc" => "ALTER TABLE app_settings ADD COLUMN sp_dc TEXT NOT NULL DEFAULT ''",
                 "window_width" => "ALTER TABLE app_settings ADD COLUMN window_width INTEGER NOT NULL DEFAULT 720",
                 "window_height" => "ALTER TABLE app_settings ADD COLUMN window_height INTEGER NOT NULL DEFAULT 560",
                 "window_x" => "ALTER TABLE app_settings ADD COLUMN window_x INTEGER NOT NULL DEFAULT 80",

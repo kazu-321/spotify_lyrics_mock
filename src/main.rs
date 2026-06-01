@@ -1,5 +1,6 @@
 mod lyrics;
 mod spotify;
+mod spotify_official;
 mod storage;
 mod ui;
 
